@@ -1,0 +1,41 @@
+name: CI
+# Pull requests and manual runs only: no push, no schedule. Hosted runners on purpose: this repo is public, and fork
+# pull requests must never run on anyone's own machines.
+on:
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  privacy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tools/verify.sh privacy
+        env:
+          CIW_PRIVATE_WORDS: ${{ secrets.CIW_PRIVATE_WORDS }}
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify (build, self-test, script tests)
+        shell: bash
+        run: sh tools/verify.sh windows
+      - name: Renders
+        shell: powershell
+        run: Start-Process windows/bin/CIWidget.exe -ArgumentList '--render', "$env:RUNNER_TEMP\render" -Wait
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-renders
+          path: ${{ runner.temp }}/render
