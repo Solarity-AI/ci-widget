@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sh tools/verify.sh)",
+      "Bash(sh tools/verify.sh:*)",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File windows/tests/run.ps1)",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File windows/tests/run.ps1 -SkipScripts)",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1)",
+      "Bash(windows/bin/CIWidget.exe --selftest:*)",
+      "Bash(windows/bin/CIWidget.exe --render:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)"
+    ],
+    "deny": ["Read(./.env)", "Read(./.env.*)"]
+  }
+}
