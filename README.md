@@ -74,3 +74,5 @@ your config and writes what it found. See [AGENTS.md](AGENTS.md) for the layout.
 ## License
 
 [MIT](LICENSE)
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
