@@ -232,6 +232,21 @@ namespace CiWidget
             c.Eq("GH", Model.CodeFor(Model.CloudName, new List<MachineRule>()), "GitHub cloud code");
             c.Eq("MM", Model.CodeFor("mac-mini", new List<MachineRule>()), "code from 2 words");
             c.Eq("SP", Model.CodeFor("spare", new List<MachineRule>()), "code from 1 word");
+            // TC-141: every machine cell has its own code; a code set in the config never changes.
+            List<MachineRule> lab = new List<MachineRule>();
+            MachineRule labRule = new MachineRule(); labRule.Name = "Lab PC"; labRule.Code = "LP"; labRule.Patterns.Add("lab-pc"); lab.Add(labRule);
+            List<JobRow> clash = new List<JobRow>();
+            foreach (string rn in new string[] { "lab-pc-1", "build-box-1", "big-box-1", "ghost-1" })
+                { JobRow j = new JobRow(); j.Runner = rn; j.StartedUtc = Now; clash.Add(j); }
+            JobRow cj = new JobRow(); cj.Runner = "GitHub Actions 3"; cj.StartedUtc = Now; clash.Add(cj);
+            List<MachineView> cm = Model.BuildMachines(clash, lab, null);
+            Dictionary<string, string> seen = new Dictionary<string, string>();
+            bool unique = true;
+            foreach (MachineView mv in cm) { if (seen.ContainsKey(mv.Code)) unique = false; seen[mv.Code] = mv.Name; }
+            string codes = string.Join(",", cm.ConvertAll(delegate(MachineView mv) { return mv.Name + "=" + mv.Code; }).ToArray());
+            c.That(unique && cm.Count == 6, "TC-141 machine codes are unique (" + codes + ")");
+            c.That(cm.Exists(delegate(MachineView mv) { return mv.Name == "Lab PC" && mv.Code == "LP"; }) &&
+                   cm.Exists(delegate(MachineView mv) { return mv.Name == Model.CloudName && mv.Code == Model.CloudCode; }), "TC-141 configured and cloud codes are kept (" + codes + ")");
             c.Eq("45 s", Model.Elapsed(TimeSpan.FromSeconds(45)), "elapsed seconds");
             c.Eq("12 min", Model.Elapsed(TimeSpan.FromMinutes(12.7)), "elapsed minutes");
             c.Eq("1 h 35 min", Model.Elapsed(TimeSpan.FromMinutes(95)), "elapsed hours");
@@ -370,6 +385,14 @@ namespace CiWidget
             c.That(qc.Kind == CellKind.Queue && qc.Value == "243" && qc.Level == 2, "queue cell: count and critical wait");
             List<PillCell> fc = Painter.Cells(Failed(), cfg, Now);
             c.Eq("!", fc[0].Value, "pill shows ! when no account can read");
+            // TC-142: without fresh data the queue reads as unknown, never as 0.
+            PillCell fq = fc[fc.Count - 1];
+            c.That(fq.Kind == CellKind.Queue && fq.Value == "–" && fq.Spoken == "queue unknown", "TC-142 queue unknown when every account fails (" + fq.Value + " / " + fq.Spoken + ")");
+            List<PillCell> lc = Painter.Cells(new Snapshot(), cfg, Now);
+            PillCell lq = lc[lc.Count - 1];
+            c.That(lq.Kind == CellKind.Queue && lq.Value == "…" && lq.Spoken == "queue unknown", "TC-142 queue shows … while reading (" + lq.Value + " / " + lq.Spoken + ")");
+            PillCell sq = Painter.Cells(s, cfg, Now.AddMinutes(10)).FindLast(delegate(PillCell x) { return x.Kind == CellKind.Queue; });
+            c.That(sq.Value == "–" && sq.Level == 0, "TC-142 queue unknown when the data is 10 min old (" + sq.Value + ")");
             List<PillCell> stale = Painter.Cells(s, cfg, Now.AddMinutes(10));
             c.Eq("!", stale[0].Value, "pill shows ! when the data is 10 min old");
             List<CardLink> sl = new List<CardLink>();
@@ -519,10 +542,11 @@ namespace CiWidget
             Snapshot s403 = new Collector(cfg, delegate(AccountConfig a) { return (IFetcher)f403; }).Round(Now);
             c.That(s403.FirstError.Length == 0 && s403.Note == "Paused until the API limit resets", "TC-51 rate limit: paused, no error (" + s403.FirstError + " / " + s403.Note + ")");
 
-            // TC-53: a gh that hangs is stopped after the timeout, not waited for.
+            // TC-53: a gh that hangs is stopped after the timeout, not waited for. ping runs itself, not under cmd: the
+            // kill ends only the process it started, and an orphaned ping would hold this test's redirected output (TC-136).
             System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
             string outText;
-            int code = Tokens.Run(Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe", "/c ping -n 8 127.0.0.1", 1000, out outText);
+            int code = Tokens.Run(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "PING.EXE"), "-n 8 127.0.0.1", 1000, out outText);
             sw.Stop();
             c.That(code == -1 && sw.ElapsedMilliseconds < 5000, "TC-53 a hanging helper is stopped after 1 s (" + sw.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture) + " ms)");
 

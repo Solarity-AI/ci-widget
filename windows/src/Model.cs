@@ -192,7 +192,44 @@ namespace CiWidget
                 return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
             });
             order.AddRange(extra);
+            UniqueCodes(order, rules);
             return order;
+        }
+
+        // Every cell gets its own code (TC-141). Codes set in the config and GitHub cloud's are kept; a derived code that is
+        // taken becomes the name's first letter with a later one ("lab-pc" -> "LA"), else with a digit. Configured machines
+        // pick first, then the rest by name, so a code does not change while the same machines are busy.
+        static void UniqueCodes(List<MachineView> machines, List<MachineRule> rules)
+        {
+            HashSet<string> used = new HashSet<string>(StringComparer.Ordinal);
+            HashSet<string> own = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            used.Add(CloudCode);
+            foreach (MachineRule r in rules)
+                if (r.Code.Length > 0) { used.Add(r.Code.ToUpperInvariant()); own.Add(r.Name); }
+            List<MachineView> derived = new List<MachineView>(), rest = new List<MachineView>();
+            foreach (MachineView mv in machines)
+            {
+                if (mv.Name == CloudName || own.Contains(mv.Name)) continue;
+                (mv.Configured ? derived : rest).Add(mv);
+            }
+            rest.Sort(delegate(MachineView a, MachineView b) { return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase); });
+            derived.AddRange(rest);
+            foreach (MachineView mv in derived)
+            {
+                mv.Code = FreeCode(mv.Name, mv.Code, used);
+                used.Add(mv.Code);
+            }
+        }
+
+        static string FreeCode(string name, string code, HashSet<string> used)
+        {
+            if (!used.Contains(code)) return code;
+            string letters = Regex.Replace(name.ToUpperInvariant(), "[^A-Z0-9]", "");
+            if (letters.Length == 0) return code;
+            string first = letters.Substring(0, 1);
+            for (int i = 1; i < letters.Length; i++) if (!used.Contains(first + letters[i])) return first + letters[i];
+            for (int d = 2; d <= 9; d++) if (!used.Contains(first + d.ToString(CultureInfo.InvariantCulture))) return first + d.ToString(CultureInfo.InvariantCulture);
+            return code;
         }
 
         // ---------------------------------------------------------------- GitHub JSON -> rows

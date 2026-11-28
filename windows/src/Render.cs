@@ -106,6 +106,13 @@ namespace CiWidget
             }
             PillCell q = new PillCell(); q.Kind = CellKind.Queue; q.Code = "Q";
             int queued = s.QueuedCount;
+            if (t.Value == "…" || t.Value == "!")
+            {
+                // No fresh data: the queue is unknown, never 0 (TC-142).
+                q.Value = t.Value == "…" ? "…" : "–"; q.Level = 0; q.Spoken = "queue unknown";
+                cells.Add(q);
+                return cells;
+            }
             q.Value = Short(queued);
             q.Level = queued == 0 ? 0 : Math.Max(1, Model.QueueLevel(s.OldestQueuedUtc, now, cfg.QueueWarnMinutes, cfg.QueueCritMinutes));
             if (queued > 0 && Model.QueueLevel(s.OldestQueuedUtc, now, cfg.QueueWarnMinutes, cfg.QueueCritMinutes) == 0) q.Level = 0;
@@ -255,7 +262,7 @@ namespace CiWidget
             }
             if (c.Kind == CellKind.Queue)
             {
-                bool any = c.Value != "0";
+                bool any = c.Value != "0" && c.Value != "…" && c.Value != "–";   // unknown is drawn faint, like 0
                 accent = !any ? p.Faint : c.Level >= 2 ? p.Crit : c.Level == 1 ? p.Queue : p.Text;
                 fill = any && c.Level >= 1;
             }
