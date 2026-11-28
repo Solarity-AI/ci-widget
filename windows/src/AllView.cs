@@ -104,7 +104,10 @@ namespace CiWidget
             status.SelectedIndex = s.ViewStatus == "running" ? 1 : s.ViewStatus == "queued" ? 2 : 0;
             group.SelectedIndex = s.ViewGroup == "repo" ? 1 : s.ViewGroup == "none" ? 2 : 0;
             loading = false;
-            search.TextChanged += delegate { Save(); Fill(); };
+            // Search filters at once; the setting is written once typing pauses, not on every key.
+            saveSoon.Interval = 600; saveSoon.Tick += delegate { saveSoon.Stop(); Save(); };
+            search.TextChanged += delegate { saveSoon.Stop(); saveSoon.Start(); Fill(); };
+            FormClosed += delegate { if (saveSoon.Enabled) { saveSoon.Stop(); Save(); } saveSoon.Dispose(); };
             machine.SelectedIndexChanged += delegate { if (!loading) { Save(); Fill(); } };
             status.SelectedIndexChanged += delegate { if (!loading) { Save(); Fill(); } };
             group.SelectedIndexChanged += delegate { if (!loading) { Save(); Fill(); } };
@@ -141,10 +144,18 @@ namespace CiWidget
             Fill();
         }
 
+        readonly Timer saveSoon = new Timer();
+
+        // The selected job and the first visible one, by URL: kept across a refill, so a redraw never loses the user's place.
+        public string SelectedUrl { get { return list.SelectedItems.Count > 0 ? list.SelectedItems[0].Tag as string : null; } }
+        public void SelectUrl(string url) { foreach (ListViewItem it in list.Items) it.Selected = url != null && (it.Tag as string) == url; }
+
         void Fill()
         {
             DateTime now = DateTime.UtcNow;
             List<JobRow> rows = ViewFilter.Apply(snap.Jobs, search.Text, MachineKey, StatusKey, sort);
+            string selUrl = SelectedUrl;
+            string topUrl = list.Items.Count > 0 && list.TopItem != null ? list.TopItem.Tag as string : null;
             list.BeginUpdate();
             list.Items.Clear(); list.Groups.Clear();
             Dictionary<string, ListViewGroup> groups = new Dictionary<string, ListViewGroup>();
@@ -167,7 +178,16 @@ namespace CiWidget
                 list.Items.Add(it);
             }
             foreach (ListViewGroup g in groups.Values) g.Header = g.Name + " (" + g.Items.Count.ToString(CultureInfo.InvariantCulture) + ")";
+            ListViewItem top = null;
+            foreach (ListViewItem it in list.Items)
+            {
+                string u = it.Tag as string;
+                if (selUrl != null && u == selUrl) { it.Selected = true; it.Focused = true; }
+                if (topUrl != null && u == topUrl && top == null) top = it;
+            }
             list.EndUpdate();
+            if (top != null) try { list.TopItem = top; } catch (Exception) { top.EnsureVisible(); }   // TopItem can't be set with groups shown
+            else if (list.SelectedItems.Count > 0) list.SelectedItems[0].EnsureVisible();
             string q = snap.QueuedCount > 0 ? " · " + Model.Count(snap.QueuedCount, "run queued", "runs queued") : "";
             count.Text = rows.Count.ToString("N0", CultureInfo.InvariantCulture) + " of " + Model.Count(snap.Jobs.Count, "job", "jobs") + q;
         }

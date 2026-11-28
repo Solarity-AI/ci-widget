@@ -75,9 +75,15 @@ namespace CiWidget
                 DateTime stamp = ConfigStamp();
                 if (reloadConfig || stamp != cfgStamp)
                 {
-                    reloadConfig = false; cfgStamp = stamp;
-                    cfg = Config.Load();
-                    col = new Collector(cfg, delegate(AccountConfig a) { return (IFetcher)new GitHubFetcher(a); });
+                    reloadConfig = false;
+                    Config next = Config.Load(cfg);
+                    // A failed read keeps the last good config and is tried again next round (a locked file frees up).
+                    cfgStamp = next.Error.Length > 0 ? DateTime.MaxValue : stamp;
+                    if (next != cfg)
+                    {
+                        cfg = next;
+                        col = new Collector(cfg, delegate(AccountConfig a) { return (IFetcher)new GitHubFetcher(a); });
+                    }
                 }
                 try { last = col.Round(DateTime.UtcNow); }
                 catch (Exception ex) { Program.Log(ex); }
@@ -380,12 +386,17 @@ namespace CiWidget
             menu.Items.Add(Item("Edit config", false, delegate { EditConfig(); }));
             menu.Items.Add(Item("Open config folder", false, delegate { try { Directory.CreateDirectory(Config.Dir); Process.Start("explorer.exe", "\"" + Config.Dir + "\""); } catch { } }));
             bool auto = Startup.Enabled;
-            menu.Items.Add(Item("Start with Windows", auto, delegate { Startup.Set(!auto, null); }));
+            menu.Items.Add(Item("Start with Windows", auto, delegate { Startup.Toggle(!auto, null, Tell); }));
             menu.Items.Add(Item("Reset position", false, delegate { settings.OffsetFromRight = -1; settings.Save(); Housekeep(); Redraw(); }));
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(Item("Exit", false, delegate { Quit(); }));
             if (dark) foreach (ToolStripItem it in menu.Items) if (it is ToolStripSeparator) it.ForeColor = Palette.Hex("#3A3A55");
             menu.Show(Cursor.Position);
+        }
+
+        static void Tell(string text)
+        {
+            try { MessageBox.Show(text, "CI Widget", MessageBoxButtons.OK, MessageBoxIcon.Warning); } catch { }
         }
 
         // Opens config.json in the user's editor, creating it from the example first.
