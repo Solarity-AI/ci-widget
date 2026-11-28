@@ -37,7 +37,7 @@ Colours are roles in `windows/src/Render.cs` (`Palette`); components never use r
 | Background (pill, card) | #2A2A40 → #18182A | #FFFFFF → #EEF1F8 |
 | Text / sub text | #F8FAFC / #A5ABC3 | #111827 / #5B6478 |
 | Running (busy) | #34D399 | #047857 |
-| Queued (waiting) | #FBBF24 | #92400E |
+| Queued (waiting), and a job running over 1 h | #FBBF24 | #92400E |
 | Failed or stuck (> 2× the job's limit, errors) | #FF8FA3 | #BE123C |
 | Offline / unknown | #6B7280 outline | #9CA3AF outline |
 | Link (open on GitHub) | #93C5FD | #1D4ED8 |
