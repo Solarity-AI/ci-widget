@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Fixes from a manual QA pass (#152).
+
+- Installing from a terminal inside an app (like the Claude desktop app) ends in about 1 min instead of waiting 10 min and warning.
+- Every machine cell has its own code: a derived code that is taken gets another letter; codes set in the config never change.
+- The queue cell shows "…" while reading and "–" without fresh data, instead of 0.
+
 ## 1.0.1 (2026-11-27)
 
 Fixes from a deep QA pass (#97).

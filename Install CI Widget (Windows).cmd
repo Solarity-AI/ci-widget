@@ -95,16 +95,19 @@ goto end
 set "RUN=%~dp0windows\bin"
 if not exist "%RUN%" mkdir "%RUN%"
 set "LOG=%RUN%\install-outside.log"
+set "DONE=%RUN%\install-outside.done"
 set "WRAP=%RUN%\install-outside.cmd"
 set "TASK=CI Widget install"
 del "%LOG%" >nul 2>&1
+del "%DONE%" >nul 2>&1
 rem The wrapper holds no path: echo can turn letters the code page lacks into "?", and call reads ^ and % in a path
 rem again. It finds this installer and its log from its own folder (windows\bin) instead.
 > "%WRAP%" echo @echo off
 >> "%WRAP%" echo set "CIW_OUTSIDE=1"
 >> "%WRAP%" echo set "SELF=%%~dp0..\..\%~nx0"
 >> "%WRAP%" echo call "%%%%SELF%%%%" %* ^> "%%~dp0install-outside.log" 2^>^&1
->> "%WRAP%" echo echo CIW-INSTALL-DONE^>^> "%%~dp0install-outside.log"
+rem The end goes to its own file: a process the install left running may still hold the log for a while.
+>> "%WRAP%" echo echo done^> "%%~dp0install-outside.done"
 echo This window runs inside an app's private copy of your user folders; installing through Task Scheduler instead...
 rem Delayed expansion on this line only, so & and ^ in the folder name reach schtasks as they are; elsewhere a ! in
 rem the folder name must stay plain text.
@@ -118,9 +121,7 @@ if errorlevel 1 goto outsidefail
 set /a "TRIES=0"
 :outsidewait
 call :wait 1
-rem findstr reads the log through < because it cannot open a path with letters outside the ANSI code page by name.
-rem A failed < leaves the exit code as it was, so && (not errorlevel) decides.
-if exist "%LOG%" findstr /c:"CIW-INSTALL-DONE" < "%LOG%" >nul 2>&1 && goto outsidedone
+if exist "%DONE%" goto outsidedone
 set /a "TRIES+=1"
 if %TRIES% lss 600 goto outsidewait
 schtasks /Delete /TN "%TASK%" /F >nul 2>&1
@@ -129,7 +130,9 @@ goto end
 :outsidedone
 schtasks /Delete /TN "%TASK%" /F >nul 2>&1
 del "%WRAP%" >nul 2>&1
-findstr /v /c:"CIW-INSTALL-DONE" < "%LOG%"
+del "%DONE%" >nul 2>&1
+rem type cannot open a path with letters outside the ANSI code page by name; findstr reads it through < instead.
+findstr "^" < "%LOG%"
 goto end
 :outsidefail
 schtasks /Delete /TN "%TASK%" /F >nul 2>&1

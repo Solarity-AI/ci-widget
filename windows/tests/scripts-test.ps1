@@ -15,6 +15,14 @@ foreach ($name in @("ciwidget-[1]-$PID", "ci widget-main (1) & co-$PID", "ciwidg
     $log = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $box 'build.ps1') -Out $exe 2>&1 | Out-String
     Check "build: folder '$name' builds" (($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath $exe))
     Check "build: folder '$name' prints no cmd errors" ($log -notmatch 'cannot find|not recognized|syntax is incorrect')
+    # TC-136: once the self-test returns, nothing it started still holds its redirected output, so the installer's
+    # sandbox wrapper can write to that log at once.
+    if ($name.StartsWith('ciwidget-[') -and (Test-Path -LiteralPath $exe)) {
+        $probe = Join-Path $box 'lock.cmd'
+        [IO.File]::WriteAllText($probe, "@echo off`r`n`"%~1`" --selftest `"%~dp0st.txt`" > `"%~dp0lock.log`" 2>&1`r`n(echo x>> `"%~dp0lock.log`") 2>nul && echo APPEND-OK || echo APPEND-FAIL`r`n")
+        $said = & cmd.exe /c "`"$probe`" `"$exe`"" 2>&1 | Out-String
+        Check "TC-136 self-test leaves its output file free ($($said.Trim()))" ($said -match 'APPEND-OK')
+    }
     if ($name -like 'ci widget*' -and (Test-Path -LiteralPath $exe)) {
         $startup = Join-Path $box 'Startup'
         $lnk = Join-Path $startup 'CI Widget.lnk'
@@ -43,7 +51,8 @@ foreach ($name in @("ciwidget-[1]-$PID", "ci widget-main (1) & co-$PID", "ciwidg
 $inst = [IO.File]::ReadAllText((Join-Path $root 'Install CI Widget (Windows).cmd'))
 $unin = [IO.File]::ReadAllText((Join-Path $root 'Uninstall CI Widget (Windows).cmd'))
 Check 'installer: builds CIWidget.exe into Programs\CI Widget' (($inst -match 'Programs\\CI Widget') -and ($inst -match 'CIWidget\.exe'))
-Check 'installer: has the done marker for the sandbox rerun' ($inst -match 'CIW-INSTALL-DONE')
+# TC-136: the sandbox rerun's end is its own file, so a log still held by another process cannot hide it.
+Check 'TC-136 installer: the sandbox rerun ends in its own done file' (($inst -match 'install-outside\.done') -and ($inst -match 'if exist "%DONE%"'))
 Check 'installers: no leftover names' (($inst + $unin) -notmatch 'HW ?Widget|HWW_|cpu-temp')
 Check 'installers: CRLF line endings' (($inst -match "`r`n") -and ($unin -match "`r`n") -and ($inst -notmatch "[^`r]`n") -and ($unin -notmatch "[^`r]`n"))
 Check 'uninstaller: keeps the config folder' ($unin -notmatch 'rmdir[^\r\n]*ci-widget')
