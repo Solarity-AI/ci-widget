@@ -13,8 +13,17 @@
       "Bash(git log:*)",
       "Bash(gh pr view:*)",
       "Bash(gh pr checks:*)",
-      "Bash(gh run view:*)"
+      "Bash(gh run view:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git ls-files:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh run list:*)"
     ],
-    "deny": ["Read(./.env)", "Read(./.env.*)"]
+    "deny": ["Read(./.env)", "Read(./.env.*)",
+      "Edit(windows/src/WidgetStrip.cs)",
+      "Write(windows/src/WidgetStrip.cs)"
+    ]
   }
 }

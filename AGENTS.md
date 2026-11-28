@@ -12,9 +12,11 @@ no admin rights. Its only network calls go to api.github.com, with the token `gh
 - `sh tools/verify.sh windows`: the same, then `windows/tests/scripts-test.ps1` (scratch folders only, never the real
   Startup folder or config). Run it for a change to the installers or `windows/*.cmd`/`*.ps1`.
 - `sh tools/verify.sh privacy`: `tools/privacy-check.sh`, no tokens, user folders or private names in tracked files.
+- Timing on Windows: `privacy` ~1 s, `windows-core` ~4 s, `windows` ~18 s. Output: `PASS <check>` or `FAIL <check>` per check;
+  the exit code is non-zero on any failure. Off Windows only `privacy` runs (`SKIP windows`).
 - After a build: `windows/bin/CIWidget.exe --selftest <report.txt>`, `--render <dir>` (PNG renders of every state) and
-  `--probe <out.json>` (1 live round against GitHub with the real config). Always pass the file or folder: without it the
-  exe starts the real widget.
+  `--probe <out.json>` (1 live round against GitHub with the real config: a network call, run it only when asked). Always
+  pass the file or folder: without it the exe starts the real widget.
 
 ## Layout
 
@@ -23,6 +25,13 @@ no admin rights. Its only network calls go to api.github.com, with the token `gh
 - `windows/src/Render.cs` draws the pill and the card; `AllView.cs` is the Show all window; `App.cs` the widget and modes;
   `Install.cs` the install and uninstall steps; `TestModes.cs` the self-test, the fake data and `--render`.
 - Root `Install CI Widget (Windows).cmd` and `Uninstall CI Widget (Windows).cmd`: tested by `windows/tests/scripts-test.ps1`.
+
+## Tests and changelog
+
+- Self-test checks live in `windows/src/TestModes.cs` (`c.That(ok, "TC-<n> what")`, `c.Eq(want, got, "TC-<n> what")`); give a
+  new check the next free TC number (`grep -o 'TC-[0-9]*' windows/src/TestModes.cs`). Installer and script checks live in
+  `windows/tests/scripts-test.ps1`.
+- Every user-visible change adds a line under `## Unreleased` in `CHANGELOG.md` (plain words, 1 line per change).
 
 ## Rules
 
