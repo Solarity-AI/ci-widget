@@ -19,6 +19,9 @@ namespace CiWidget
         public readonly List<string> Calls = new List<string>();
         public string PrepareError = "";
         public int Remaining = 4800, Limit = 5000;
+        public int FailAll;                      // every call answers this HTTP status
+        public bool Garbage;                     // every call answers 200 with JSON that can't be read
+        public readonly Dictionary<string, int> FailPath = new Dictionary<string, int>();
 
         public string Prepare() { return PrepareError; }
 
@@ -28,6 +31,14 @@ namespace CiWidget
             Fetch f = new Fetch();
             f.Remaining = Remaining; f.Limit = Limit; f.ResetUtc = TestModes.Now.AddMinutes(40);
             Remaining--;
+            int st = 0;
+            if (FailAll != 0 || FailPath.TryGetValue(path, out st))
+            {
+                f.Status = FailAll != 0 ? FailAll : st;
+                f.Error = f.Status == 401 ? "Bad credentials" : "Server Error";
+                return f;
+            }
+            if (Garbage) { f.Status = 200; f.Error = "unreadable answer"; return f; }
             object body;
             if (!Answers.TryGetValue(path, out body))
             {
@@ -374,6 +385,184 @@ namespace CiWidget
             c.Eq(1, ViewFilter.Apply(all, "E2E chrome", "", "", "elapsed").Count, "search: every word must match");
             c.Eq("api", ViewFilter.Apply(all, "", "", "running", "elapsed")[0].RepoShort, "sort by elapsed, longest first");
             c.Eq("api", ViewFilter.Apply(all, "", "", "", "repo")[0].RepoShort, "sort by repo");
+
+            QaRegression(c, cfg, s);
+        }
+
+        // Pixels with ink after drawing s in the pill's value font into a box of the given width (left aligned, as Text() trims).
+        static int InkCount(string s, float width)
+        {
+            using (Bitmap bmp = new Bitmap(220, 30))
+            {
+                bmp.SetResolution(96, 96);
+                using (Graphics g = Graphics.FromImage(bmp))
+                using (Font f = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point))
+                {
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                    g.Clear(Color.Transparent);
+                    Painter.Text(g, s, f, Color.Black, new RectangleF(0, 0, width, 30), StringAlignment.Near, StringAlignment.Center);
+                }
+                int n = 0;
+                for (int y = 0; y < bmp.Height; y++) for (int x = 0; x < bmp.Width; x++) if (bmp.GetPixel(x, y).A > 60) n++;
+                return n;
+            }
+        }
+
+        // Regression tests for the QA campaign's bugs, each named by its test case (TC-<case issue>).
+        static void QaRegression(Checks c, Config cfg, Snapshot sample)
+        {
+            // TC-30: a 4-digit count is shortened in the pill's title and machine cells, never cut to "1…".
+            Snapshot big = new Snapshot(); big.TakenUtc = Now;
+            for (int i = 0; i < 1234; i++)
+            {
+                JobRow j = new JobRow(); j.Repo = "acme/web-app"; j.Workflow = "CI"; j.Job = "t" + i.ToString(CultureInfo.InvariantCulture);
+                j.Url = "https://github.com/acme/web-app/actions/runs/1/job/" + i.ToString(CultureInfo.InvariantCulture);
+                j.Runner = "build-box-1"; j.Status = "in_progress"; j.StartedUtc = Now.AddMinutes(-1); big.Jobs.Add(j);
+            }
+            big.Machines = Model.BuildMachines(big.Jobs, cfg.Machines, null);
+            AccountHealth bh = new AccountHealth(); bh.Name = "acme"; bh.Remaining = 4000; bh.Limit = 5000; big.Accounts.Add(bh);
+            List<PillCell> bc = Painter.Cells(big, cfg, Now);
+            c.Eq("1.2k", bc[0].Value, "TC-30 pill title shortens 1,234 to 1.2k");
+            c.That(bc.Exists(delegate(PillCell x) { return x.Code == "BB" && x.Value == "1.2k"; }), "TC-30 machine cell shortens 1,234 to 1.2k");
+            // ...and each cell is wide enough for its value: the title's value area (58% of it) and a machine cell hold "1.2k" whole.
+            float vw = Painter.ValueWidth("1.2k");
+            c.That(Painter.CellWidth(bc[0]) * 0.58f - 2 >= vw, "TC-30 pill title is wide enough for 1.2k");
+            c.That(bc.TrueForAll(delegate(PillCell x) { return x.Kind == CellKind.Title || Painter.CellWidth(x) >= Painter.ValueWidth(x.Value) + 4; }), "TC-30 machine cells are wide enough for their values");
+            c.That(Painter.CellWidth(bc[0]) > Painter.TitleW, "TC-30 title cell grows past its base width for 1.2k");
+            // Drawn into the title's value area, "1.2k" leaves the same ink as in a wide box: nothing was trimmed.
+            float area = Painter.CellWidth(bc[0]) * 0.58f - 2;
+            c.That(InkCount("1.2k", area) == InkCount("1.2k", 200), "TC-30 1.2k is drawn whole in the title cell (ink " + InkCount("1.2k", area).ToString(CultureInfo.InvariantCulture) + " vs " + InkCount("1.2k", 200).ToString(CultureInfo.InvariantCulture) + ")");
+
+            // TC-35: the line under a machine whose rows are not drawn says how many jobs it has, not "+N more".
+            c.Eq("+3 more jobs on Build box", Painter.MoreJobsText(3, 2, "Build box"), "TC-35 more jobs after shown rows");
+            c.Eq("2 jobs on Build box", Painter.MoreJobsText(2, 0, "Build box"), "TC-35 no rows shown: no \"more\"");
+
+            // TC-36: 30 busy machines keep the card under its height cap, the rest in a "+N more machines" line.
+            Snapshot wide = new Snapshot(); wide.TakenUtc = Now;
+            for (int i = 0; i < 60; i++)
+            {
+                int m = i / 2;
+                string rig = "rig-" + (char)('a' + m / 26) + (char)('a' + m % 26);
+                JobRow j = new JobRow(); j.Repo = "acme/api"; j.Workflow = "CI"; j.Job = "j" + i.ToString(CultureInfo.InvariantCulture);
+                j.Url = "https://github.com/acme/api/actions/runs/2/job/" + i.ToString(CultureInfo.InvariantCulture);
+                j.Runner = rig + "-1"; j.Status = "in_progress"; j.StartedUtc = Now.AddMinutes(-i); wide.Jobs.Add(j);
+            }
+            wide.Machines = Model.BuildMachines(wide.Jobs, new List<MachineRule>(), null);
+            AccountHealth wh = new AccountHealth(); wh.Name = "acme"; wh.Remaining = 4000; wh.Limit = 5000; wide.Accounts.Add(wh);
+            List<CardLink> wl = new List<CardLink>();
+            using (System.Drawing.Bitmap card = Painter.Card(wide, cfg, Palette.For(true), 1f, false, Now, 1000, wl))
+                c.That(card.Height <= 1040, "TC-36 card with 30 busy machines fits its 1,000 px cap (" + card.Height.ToString(CultureInfo.InvariantCulture) + ")");
+            c.Eq(11, Painter.FitCount(30, 500, 40, 22), "TC-36 machines that fit keep room for the +N line");
+            c.Eq(3, Painter.FitCount(3, 500, 40, 22), "TC-36 all machines fit: no +N line");
+
+            // TC-37: idle chips that don't all fit end with "+N", with room kept for it.
+            float[] chips29 = new float[29];
+            for (int i = 0; i < chips29.Length; i++) chips29[i] = 40;
+            Func<int, float> plus = delegate(int left) { return 20f; };
+            c.Eq(6, Painter.ChipsFit(chips29, 0, 300, 5, plus), "TC-37 6 of 29 chips fit, room kept for +23");
+            c.Eq(2, Painter.ChipsFit(new float[] { 40, 40 }, 0, 85, 5, plus), "TC-37 the last chip needs no room for +N");
+
+            // TC-38: a redraw of Show all keeps the selected job.
+            using (AllViewForm av = new AllViewForm(Settings.Parse(new string[0])))
+            {
+                IntPtr handle = av.Handle;
+                foreach (System.Windows.Forms.Control ctl in av.Controls) handle = ctl.Handle;   // the list's window, as when shown
+                av.SetData(sample);
+                string url = sample.Jobs[sample.Jobs.Count - 1].Url;
+                av.SelectUrl(url);
+                c.Eq(url, av.SelectedUrl, "TC-38 a job can be selected");
+                av.SetData(sample);
+                c.Eq(url, av.SelectedUrl, "TC-38 Show all keeps the selected job across a redraw");
+            }
+
+            // TC-39: a config saved mid-edit keeps the last good config.
+            Config good = Config.Parse(SampleConfig);
+            Config bad = Config.FromText("{ \"machines\": [", good);
+            c.That(bad.Machines.Count == 3 && bad.Accounts[0].Name == "acme" && bad.Error.IndexOf("last good config", StringComparison.Ordinal) >= 0,
+                   "TC-39 broken config keeps the last good one and says so (" + bad.Error + ")");
+            c.That(Config.FromText("{ not json", null).Error.Length > 0, "TC-39 broken first config is reported");
+
+            // TC-42: a warning set alone never puts the critical wait under it.
+            Config warn = Config.Parse("{\"queue_warn_minutes\": 60}");
+            c.That(warn.QueueCritMinutes >= warn.QueueWarnMinutes, "TC-42 critical wait at least the warning (" + warn.QueueCritMinutes.ToString(CultureInfo.InvariantCulture) + ")");
+
+            // TC-43: an emoji machine code is never cut inside a character.
+            Config emo = Config.Parse("{\"machines\": [{\"name\": \"x\", \"code\": \"\uD83D\uDE80\uD83D\uDE80\"}]}");
+            c.Eq("\uD83D\uDE80\uD83D\uDE80", emo.Machines[0].Code, "TC-43 2 emoji kept whole");
+            c.Eq(6, Model.FirstChars("\uD83D\uDE80\uD83D\uDE80\uD83D\uDE80\uD83D\uDE80", 3).Length, "TC-43 3 of 4 emoji, no lone surrogate");
+
+            // TC-46: 2 accounts that see the same org count each job, queue and repo once.
+            Config two = Config.Parse(SampleConfig.Replace("{ \"name\": \"acme\", \"orgs\": [\"acme\"], \"runner_orgs\": [\"acme\"] }",
+                "{ \"name\": \"one\", \"orgs\": [\"acme\"] }, { \"name\": \"two\", \"orgs\": [\"acme\"] }"));
+            FakeFetcher tf = SampleFetcher();
+            Snapshot ts = new Collector(two, delegate(AccountConfig a) { return (IFetcher)tf; }).Round(Now);
+            c.Eq(2, two.Accounts.Count, "TC-46 config has 2 accounts");
+            c.That(ts.RunningCount == 6 && ts.Jobs.Count == 7 && ts.QueuedCount == 243 && ts.ReposWatched == 4,
+                   "TC-46 each job counted once (running " + ts.RunningCount.ToString(CultureInfo.InvariantCulture) + ", queued " + ts.QueuedCount.ToString(CultureInfo.InvariantCulture) + ", repos " + ts.ReposWatched.ToString(CultureInfo.InvariantCulture) + ")");
+
+            // TC-47 to TC-50: a failing API is an error or a note, never "nothing running".
+            FakeFetcher f401 = SampleFetcher(); f401.FailAll = 401;
+            Snapshot s401 = new Collector(cfg, delegate(AccountConfig a) { return (IFetcher)f401; }).Round(Now);
+            c.That(s401.FirstError.IndexOf("refused the token", StringComparison.Ordinal) >= 0, "TC-47 a refused token is an error (" + s401.FirstError + ")");
+            FakeFetcher f500 = SampleFetcher(); f500.FailAll = 500;
+            Snapshot s500 = new Collector(cfg, delegate(AccountConfig a) { return (IFetcher)f500; }).Round(Now);
+            c.That(s500.FirstError.IndexOf("could not list the repos of acme", StringComparison.Ordinal) >= 0, "TC-48 a 500 is an error (" + s500.FirstError + ")");
+            FakeFetcher fbad = SampleFetcher(); fbad.Garbage = true;
+            Snapshot sbad = new Collector(cfg, delegate(AccountConfig a) { return (IFetcher)fbad; }).Round(Now);
+            c.That(sbad.FirstError.IndexOf("unreadable answer", StringComparison.Ordinal) >= 0, "TC-49 unreadable JSON is an error (" + sbad.FirstError + ")");
+            FakeFetcher f502 = SampleFetcher(); f502.FailPath["/repos/acme/web-app/actions/runs/101/jobs?filter=latest&per_page=100"] = 502;
+            Snapshot s502 = new Collector(cfg, delegate(AccountConfig a) { return (IFetcher)f502; }).Round(Now);
+            c.That(s502.Note.IndexOf("1 repo could not be read", StringComparison.Ordinal) >= 0, "TC-50 a run whose jobs can't be read is noted (" + s502.Note + ")");
+
+            // TC-51: out of API calls is a pause, never an account error.
+            FakeFetcher f403 = SampleFetcher(); f403.FailAll = 403; f403.Remaining = 0;
+            Snapshot s403 = new Collector(cfg, delegate(AccountConfig a) { return (IFetcher)f403; }).Round(Now);
+            c.That(s403.FirstError.Length == 0 && s403.Note == "Paused until the API limit resets", "TC-51 rate limit: paused, no error (" + s403.FirstError + " / " + s403.Note + ")");
+
+            // TC-53: a gh that hangs is stopped after the timeout, not waited for.
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            string outText;
+            int code = Tokens.Run(Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe", "/c ping -n 8 127.0.0.1", 1000, out outText);
+            sw.Stop();
+            c.That(code == -1 && sw.ElapsedMilliseconds < 5000, "TC-53 a hanging helper is stopped after 1 s (" + sw.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture) + " ms)");
+
+            // TC-54 and TC-55: a 150-job matrix and 130 runs are read past the first page.
+            Config pages = Config.Parse("{ \"accounts\": [ { \"name\": \"acme\", \"repos\": [\"acme/big\", \"acme/many\"] } ] }");
+            FakeFetcher pf = new FakeFetcher();
+            string jp = "/repos/acme/big/actions/runs/501/jobs?filter=latest&per_page=100";
+            pf.Answers["/repos/acme/big/actions/runs?status=in_progress&per_page=100"] = Runs(1, Run("acme/big", 501, "CI", "main", 0, 5, "u1"));
+            pf.Answers["/repos/acme/big/actions/runs?status=queued&per_page=100"] = Runs(0);
+            object[] jobs1 = new object[100], jobs2 = new object[50];
+            for (int i = 0; i < 150; i++)
+            {
+                object jo = Job("acme/big", 10000 + i, "shard " + i.ToString(CultureInfo.InvariantCulture), "in_progress", "build-box-1", 5, new string[] { "self-hosted" }, Steps, 3);
+                if (i < 100) jobs1[i] = jo; else jobs2[i - 100] = jo;
+            }
+            pf.Answers[jp] = D("total_count", 150, "jobs", jobs1);
+            pf.Answers[jp + "&page=2"] = D("total_count", 150, "jobs", jobs2);
+            string rp = "/repos/acme/many/actions/runs?status=in_progress&per_page=100";
+            object[] runs1 = new object[100], runs2 = new object[30];
+            for (int i = 0; i < 130; i++)
+            {
+                long id = 7000 + i;
+                object ro = Run("acme/many", id, "CI", "main", 0, 5, "u1");
+                if (i < 100) runs1[i] = ro; else runs2[i - 100] = ro;
+                pf.Answers["/repos/acme/many/actions/runs/" + id.ToString(CultureInfo.InvariantCulture) + "/jobs?filter=latest&per_page=100"] =
+                    D("total_count", 1, "jobs", new object[] { Job("acme/many", 20000 + i, "test", "in_progress", "build-box-2", 5, new string[] { "self-hosted" }, Steps, 3) });
+            }
+            pf.Answers[rp] = Runs(130, runs1);
+            pf.Answers[rp + "&page=2"] = Runs(130, runs2);
+            pf.Answers["/repos/acme/many/actions/runs?status=queued&per_page=100"] = Runs(0);
+            Snapshot psn = new Collector(pages, delegate(AccountConfig a) { return (IFetcher)pf; }).Round(Now);
+            c.Eq(150, psn.Jobs.FindAll(delegate(JobRow j) { return j.Repo == "acme/big" && j.Running; }).Count, "TC-54 all 150 jobs of a big matrix");
+            c.Eq(130, psn.Jobs.FindAll(delegate(JobRow j) { return j.Repo == "acme/many" && j.Running; }).Count, "TC-55 all 130 runs in progress");
+
+            // TC-60: a Startup change that fails tells the user, with the folder.
+            string notDir = Path.GetTempFileName();
+            string told = null;
+            bool set = Startup.Toggle(true, Path.Combine(notDir, "Startup"), delegate(string m) { told = m; });
+            try { File.Delete(notDir); } catch { }
+            c.That(!set && told != null && told.IndexOf("Could not add CI Widget", StringComparison.Ordinal) >= 0, "TC-60 a failed Startup change is told (" + (told ?? "nothing") + ")");
         }
 
         static MachineView Find(Snapshot s, string name)

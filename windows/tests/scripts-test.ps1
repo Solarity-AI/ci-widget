@@ -47,6 +47,26 @@ Check 'installer: has the done marker for the sandbox rerun' ($inst -match 'CIW-
 Check 'installers: no leftover names' (($inst + $unin) -notmatch 'HW ?Widget|HWW_|cpu-temp')
 Check 'installers: CRLF line endings' (($inst -match "`r`n") -and ($unin -match "`r`n") -and ($inst -notmatch "[^`r]`n") -and ($unin -notmatch "[^`r]`n"))
 Check 'uninstaller: keeps the config folder' ($unin -notmatch 'rmdir[^\r\n]*ci-widget')
+# TC-59: the root uninstaller, run in a scratch copy with scratch app folders and a stand-in taskkill (a real widget is never
+# stopped), finds and removes windows\bin\CIWidget.exe next to it.
+$box = Join-Path ([IO.Path]::GetTempPath()) "ciwidget-unin-$PID"
+$fake = Join-Path $box 'fakebin'
+foreach ($d in @('windows\bin', 'fakebin', 'local', 'roaming')) { [IO.Directory]::CreateDirectory((Join-Path $box $d)) | Out-Null }
+[IO.File]::Copy((Join-Path $env:SystemRoot 'System32\where.exe'), (Join-Path $fake 'taskkill.exe'), $true)   # a .cmd stand-in would end the script
+$copy = Join-Path $box 'Uninstall CI Widget (Windows).cmd'
+[IO.File]::Copy((Join-Path $root 'Uninstall CI Widget (Windows).cmd'), $copy, $true)
+$binExe = Join-Path $box 'windows\bin\CIWidget.exe'
+[IO.File]::Copy((Join-Path $env:SystemRoot 'System32\where.exe'), $binExe, $true)
+$stdin = Join-Path $box 'stdin.txt'; [IO.File]::WriteAllText($stdin, "`r`n")
+$stdout = Join-Path $box 'stdout.txt'
+$saved = @($env:LOCALAPPDATA, $env:APPDATA, $env:PATH)
+$env:LOCALAPPDATA = Join-Path $box 'local'; $env:APPDATA = Join-Path $box 'roaming'; $env:PATH = "$fake;$($env:PATH)"
+try { Start-Process -FilePath $copy -Wait -NoNewWindow -RedirectStandardInput $stdin -RedirectStandardOutput $stdout | Out-Null }
+finally { $env:LOCALAPPDATA = $saved[0]; $env:APPDATA = $saved[1]; $env:PATH = $saved[2] }
+Check 'TC-59 uninstaller: removes windows\bin\CIWidget.exe next to it' (-not (Test-Path -LiteralPath $binExe))
+Check 'TC-59 uninstaller: says CI Widget was removed' ((Get-Content -LiteralPath $stdout -Raw) -match 'CI Widget removed')
+Check 'TC-59 uninstaller: no control characters in the script' ($unin -notmatch '[\x00-\x08\x0B\x0C\x0E-\x1F]')
+Remove-Item -LiteralPath $box -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 if ($fails -eq 0) { Write-Host "scripts-test: all passed" } else { Write-Host "scripts-test: $fails failed" }
 exit $fails

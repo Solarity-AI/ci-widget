@@ -41,6 +41,15 @@ namespace CiWidget
 
         public static bool Enabled { get { return File.Exists(LinkPath(null)); } }
 
+        // The menu's toggle: a change that fails says so, with the folder, instead of leaving the old state silently.
+        public static bool Toggle(bool on, string dir, Action<string> tell)
+        {
+            if (Set(on, dir)) return true;
+            string where = Path.GetDirectoryName(LinkPath(dir));
+            tell((on ? "Could not add CI Widget to " : "Could not remove CI Widget from ") + "your Startup folder (" + where + "). Check that the folder exists and you can write to it.");
+            return false;
+        }
+
         public static bool Set(bool on, string dir)
         {
             try

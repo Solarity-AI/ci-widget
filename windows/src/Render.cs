@@ -85,7 +85,7 @@ namespace CiWidget
             foreach (AccountHealth a in s.Accounts) if (a.Ok) allFailed = false;
             if (s.TakenUtc == DateTime.MinValue && !allFailed) { t.Value = "…"; t.Spoken = "CI Widget: reading GitHub"; }
             else if (allFailed || stale) { t.Value = "!"; t.Level = 2; t.Spoken = "CI Widget: no fresh data"; }
-            else { t.Value = s.RunningCount.ToString(Inv); t.Level = 0; t.Spoken = Model.Count(s.RunningCount, "job running", "jobs running"); }
+            else { t.Value = Short(s.RunningCount); t.Level = 0; t.Spoken = Model.Count(s.RunningCount, "job running", "jobs running"); }
             cells.Add(t);
 
             int shown = 0, hiddenBusy = 0;
@@ -94,14 +94,14 @@ namespace CiWidget
                 if (!m.Configured && m.Jobs.Count == 0) continue;
                 if (shown >= MaxPillMachines) { hiddenBusy += m.Jobs.Count; continue; }
                 PillCell c = new PillCell(); c.Kind = CellKind.Machine; c.Code = m.Code; c.State = m.State;
-                c.Value = m.State == MachineState.Offline ? "–" : m.Jobs.Count.ToString(Inv);
+                c.Value = m.State == MachineState.Offline ? "–" : Short(m.Jobs.Count);
                 c.Spoken = m.Name + " " + (m.State == MachineState.Offline ? "offline" : Model.Count(m.Jobs.Count, "job", "jobs"));
                 cells.Add(c); shown++;
             }
             if (hiddenBusy > 0)
             {
                 PillCell c = new PillCell(); c.Kind = CellKind.Machine; c.Code = "+"; c.State = MachineState.Busy;
-                c.Value = hiddenBusy.ToString(Inv); c.Spoken = Model.Count(hiddenBusy, "job", "jobs") + " on other machines";
+                c.Value = Short(hiddenBusy); c.Spoken = Model.Count(hiddenBusy, "job", "jobs") + " on other machines";
                 cells.Add(c);
             }
             PillCell q = new PillCell(); q.Kind = CellKind.Queue; q.Code = "Q";
@@ -115,6 +115,32 @@ namespace CiWidget
         }
 
         // 1,234 -> "1.2k" so the cell keeps its width.
+        // How many chips fit between x and right, each followed by gap; while more follow, room for "+N" (N left after it) is kept.
+        public static int ChipsFit(float[] widths, float x, float right, float gap, Func<int, float> plusWidth)
+        {
+            for (int i = 0; i < widths.Length; i++)
+            {
+                int left = widths.Length - i - 1;
+                float reserve = left > 0 ? plusWidth(left) : 0;
+                if (x + widths[i] + reserve > right) return i;
+                x += widths[i] + gap;
+            }
+            return widths.Length;
+        }
+
+        // How many of n blocks of size each fit in room; when not all fit, 1 more line of size extra is kept for the rest.
+        public static int FitCount(int n, float room, float each, float extra)
+        {
+            if (n * each <= room) return n;
+            return Math.Max(0, Math.Min(n, (int)((room - extra) / each)));
+        }
+
+        // The line under a machine's job rows: "+3 more jobs on X", or "3 jobs on X" when no row of it is drawn.
+        public static string MoreJobsText(int hidden, int shown, string machine)
+        {
+            return (shown > 0 ? "+" + Model.Count(hidden, "more job", "more jobs") : Model.Count(hidden, "job", "jobs")) + " on " + machine;
+        }
+
         public static string Short(int n)
         {
             if (n < 1000) return n.ToString(Inv);
@@ -137,7 +163,40 @@ namespace CiWidget
             return sb.ToString();
         }
 
-        static float CellWidth(PillCell c) { return c.Kind == CellKind.Title ? TitleW : CellW; }
+        // A cell is at least its base width and grows to fit its value ("1.2k", "999"), measured in the value font at 96 DPI.
+        public static float CellWidth(PillCell c)
+        {
+            float v = ValueWidth(c.Value);
+            if (c.Kind == CellKind.Title) return Math.Max(TitleW, (float)Math.Ceiling((v + 4) / 0.58f));
+            return Math.Max(CellW, (float)Math.Ceiling(v + 6));
+        }
+
+        static readonly Dictionary<string, float> valueWidths = new Dictionary<string, float>();
+        static readonly object measureLock = new object();
+        static Bitmap measureBmp;
+
+        // The width of a value drawn in the pill's value font at scale 1 (cached; the pill shows few distinct values).
+        public static float ValueWidth(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return 0;
+            lock (measureLock)
+            {
+                float w;
+                if (valueWidths.TryGetValue(value, out w)) return w;
+                if (measureBmp == null) { measureBmp = new Bitmap(1, 1); measureBmp.SetResolution(96, 96); }
+                // Measured the way Text() draws it (same hint, same format with its padding), so it is never trimmed.
+                using (Graphics g = Graphics.FromImage(measureBmp))
+                using (Font f = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point))
+                using (StringFormat sf = new StringFormat(StringFormatFlags.NoWrap))
+                {
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    w = (float)Math.Ceiling(g.MeasureString(value, f, 1000, sf).Width) + 1;
+                }
+                if (valueWidths.Count > 200) valueWidths.Clear();
+                valueWidths[value] = w;
+                return w;
+            }
+        }
 
         public static Size PillSize(List<PillCell> cells, float scale)
         {
@@ -294,8 +353,14 @@ namespace CiWidget
                 float queueH = qs2.Count == 0 && waitingJobs == 0 ? 0 : headH + Math.Min(qs2.Count, 5) * 22 * sc + (qs2.Count > 5 ? 20 * sc : 0) + (waitingJobs > 0 ? 22 * sc : 0) + gap;
                 float restH = rest.Count > 0 ? 30 * sc : 0;
                 float footH = 34 * sc;
-                // Each busy machine costs its header, a spacer and room for a "+N more" line, then its rows.
-                float avail = maxHeight - 2 * m - 2 * pad - fixedH - queueH - restH - footH - busy.Count * (headH + 24 * sc);
+                // Each busy machine costs its header, a spacer and room for a "+N more" line, then its rows. Machines that
+                // don't fit even without rows go into 1 "+N more machines" line, so the card keeps its height cap.
+                float perMachine = headH + 24 * sc, moreMachinesH = 22 * sc;
+                float room = maxHeight - 2 * m - 2 * pad - fixedH - queueH - restH - footH;
+                List<MachineView> unshown = new List<MachineView>();
+                int fit = FitCount(busy.Count, room, perMachine, moreMachinesH);
+                if (fit < busy.Count) { unshown = busy.GetRange(fit, busy.Count - fit); busy = busy.GetRange(0, fit); }
+                float avail = room - busy.Count * perMachine - (unshown.Count > 0 ? moreMachinesH : 0);
                 int rowsAllowed = Math.Max(0, (int)(avail / rowH));
                 // Share rows: 1 per busy machine in order while they last, then the rest round by round.
                 Dictionary<MachineView, int> quota = new Dictionary<MachineView, int>();
@@ -309,7 +374,7 @@ namespace CiWidget
                 }
 
                 bool anyOk = false; foreach (AccountHealth a in s.Accounts) if (a.Ok) anyOk = true;
-                if (s.TakenUtc != DateTime.MinValue && busy.Count == 0 && anyOk)
+                if (s.TakenUtc != DateTime.MinValue && busy.Count == 0 && unshown.Count == 0 && anyOk)
                     AddLine(lines, 44 * sc, delegate(Graphics g, float y)
                     {
                         Text(g, "Nothing running right now.", fHead, p.SubText, new RectangleF(x0, y, inner, 40 * sc), StringAlignment.Center, StringAlignment.Center);
@@ -342,11 +407,22 @@ namespace CiWidget
                         CardLink link = new CardLink(); link.Target = "action:showall"; pending.Add(link);
                         AddLine(lines, 20 * sc, delegate(Graphics g, float y)
                         {
-                            Text(g, "+" + Model.Count(hidden, "more job", "more jobs") + " on " + mm.Name, fSub, p.Link, new RectangleF(x0 + 32 * sc, y, inner, 18 * sc), StringAlignment.Near, StringAlignment.Center);
+                            Text(g, MoreJobsText(hidden, n, mm.Name), fSub, p.Link, new RectangleF(x0 + 32 * sc, y, inner, 18 * sc), StringAlignment.Near, StringAlignment.Center);
                             link.Rect = new RectangleF(x0, y, inner, 20 * sc);
                         });
                     }
                     AddLine(lines, 4 * sc, null);
+                }
+                if (unshown.Count > 0)
+                {
+                    int jobsUnshown = 0; foreach (MachineView mv in unshown) jobsUnshown += mv.Jobs.Count;
+                    string t = "+" + Model.Count(unshown.Count, "more machine", "more machines") + " with " + Model.Count(jobsUnshown, "job", "jobs");
+                    CardLink link = new CardLink(); link.Target = "action:showall"; pending.Add(link);
+                    AddLine(lines, moreMachinesH, delegate(Graphics g, float y)
+                    {
+                        Text(g, t, fSub, p.Link, new RectangleF(x0, y, inner, 20 * sc), StringAlignment.Near, StringAlignment.Center);
+                        link.Rect = new RectangleF(x0, y, inner, 20 * sc);
+                    });
                 }
 
                 // Machines with nothing running: 1 line of chips.
@@ -357,12 +433,21 @@ namespace CiWidget
                         float x = x0;
                         Text(g, "No jobs:", fSub, p.SubText, new RectangleF(x, y, 60 * sc, 26 * sc), StringAlignment.Near, StringAlignment.Center);
                         x += 56 * sc;
-                        foreach (MachineView mv in rest)
+                        string[] labels = new string[rest.Count];
+                        float[] widths = new float[rest.Count];
+                        for (int i = 0; i < rest.Count; i++)
                         {
-                            string label = mv.Code + (mv.State == MachineState.Offline ? " offline" : mv.State == MachineState.Idle ? " idle" : "");
-                            SizeF ls = g.MeasureString(label, fCode);
-                            RectangleF chip = new RectangleF(x, y + 5 * sc, ls.Width + 10 * sc, 17 * sc);
-                            if (chip.Right > x0 + inner) break;
+                            MachineView mv0 = rest[i];
+                            labels[i] = mv0.Code + (mv0.State == MachineState.Offline ? " offline" : mv0.State == MachineState.Idle ? " idle" : "");
+                            widths[i] = g.MeasureString(labels[i], fCode).Width + 10 * sc;
+                        }
+                        Graphics gm = g;
+                        int shown = ChipsFit(widths, x, x0 + inner, 5 * sc, delegate(int rem) { return gm.MeasureString("+" + rem.ToString(Inv), fCode).Width + 6 * sc; });
+                        for (int i = 0; i < shown; i++)
+                        {
+                            MachineView mv = rest[i];
+                            string label = labels[i];
+                            RectangleF chip = new RectangleF(x, y + 5 * sc, widths[i], 17 * sc);
                             using (GraphicsPath cp = Round(chip, 5 * sc))
                             {
                                 Color c = mv.State == MachineState.Offline ? p.Off : p.SubText;
@@ -372,6 +457,8 @@ namespace CiWidget
                             }
                             x = chip.Right + 5 * sc;
                         }
+                        if (shown < rest.Count)
+                            Text(g, "+" + (rest.Count - shown).ToString(Inv), fCode, p.SubText, new RectangleF(x, y + 5 * sc, Math.Max(1f, x0 + inner - x), 17 * sc), StringAlignment.Near, StringAlignment.Center);
                     });
                 }
 

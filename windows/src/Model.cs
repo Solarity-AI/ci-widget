@@ -277,6 +277,14 @@ namespace CiWidget
             return ((int)t.TotalDays).ToString(CultureInfo.InvariantCulture) + " d " + t.Hours.ToString(CultureInfo.InvariantCulture) + " h";
         }
 
+        // The first n characters as the reader sees them (text elements), never half an emoji or an accent alone.
+        public static string FirstChars(string s, int n)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            StringInfo si = new StringInfo(s);
+            return si.LengthInTextElements <= n ? s : si.SubstringByTextElements(0, n);
+        }
+
         public static string Count(int n, string one, string many)
         {
             return n.ToString("N0", CultureInfo.InvariantCulture) + " " + (n == 1 ? one : many);

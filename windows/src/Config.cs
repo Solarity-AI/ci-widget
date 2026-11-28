@@ -135,19 +135,33 @@ namespace CiWidget
             return c;
         }
 
-        public static Config Load()
+        public static Config Load() { return Load(null); }
+
+        // Reads config.json. A file that can't be read or parsed (saved half-way, locked by the editor) keeps lastGood,
+        // with the reason in Error, so the widget never falls back to the default account in the middle of an edit.
+        public static Config Load(Config lastGood)
         {
+            string text;
             try
             {
                 if (!File.Exists(FilePath)) return Default();
-                return Parse(File.ReadAllText(FilePath, Encoding.UTF8));
+                text = File.ReadAllText(FilePath, Encoding.UTF8);
             }
-            catch (Exception ex)
-            {
-                Config c = Default();
-                c.Error = "config.json: " + ex.Message;
-                return c;
-            }
+            catch (Exception ex) { return Failed(lastGood, ex); }
+            return FromText(text, lastGood);
+        }
+
+        public static Config FromText(string text, Config lastGood)
+        {
+            try { return Parse(text); }
+            catch (Exception ex) { return Failed(lastGood, ex); }
+        }
+
+        static Config Failed(Config lastGood, Exception ex)
+        {
+            Config c = lastGood ?? Default();
+            c.Error = "config.json: " + ex.Message + (lastGood != null ? " (still using the last good config)" : "");
+            return c;
         }
 
         public static Config Parse(string text)
@@ -185,7 +199,7 @@ namespace CiWidget
                     MachineRule r = new MachineRule();
                     r.Name = Json.Str(d, "name");
                     r.Code = Json.Str(d, "code");
-                    if (r.Code.Length > 3) r.Code = r.Code.Substring(0, 3);
+                    r.Code = Model.FirstChars(r.Code, 3);   // whole characters: an emoji is 2 UTF-16 units
                     r.Patterns = Json.Strings(d, "runners");
                     if (r.Name.Length > 0) c.Machines.Add(r);
                 }
@@ -193,7 +207,8 @@ namespace CiWidget
             int n = Json.Int(root, "poll_seconds"); if (n > 0) c.PollSeconds = Math.Max(10, Math.Min(600, n));
             n = Json.Int(root, "max_calls_per_hour"); if (n > 0) c.MaxCallsPerHour = Math.Max(60, Math.Min(4500, n));
             n = Json.Int(root, "queue_warn_minutes"); if (n > 0) c.QueueWarnMinutes = n;
-            n = Json.Int(root, "queue_crit_minutes"); if (n > 0) c.QueueCritMinutes = Math.Max(n, c.QueueWarnMinutes);
+            n = Json.Int(root, "queue_crit_minutes"); if (n > 0) c.QueueCritMinutes = n;
+            c.QueueCritMinutes = Math.Max(c.QueueCritMinutes, c.QueueWarnMinutes);   // critical never under the warning
             return c;
         }
 

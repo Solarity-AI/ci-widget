@@ -7,7 +7,7 @@ echo Removing CI Widget...
 taskkill /IM CIWidget.exe /F >nul 2>&1
 set "EXE=%APPDIR%\CIWidget.exe"
 if exist "%EXE%" goto run
-set "EXE=%~dp0windowsin\CIWidget.exe"
+set "EXE=%~dp0windows\bin\CIWidget.exe"
 if exist "%EXE%" goto run
 goto manual
 :run
@@ -17,6 +17,6 @@ if "%errorlevel%"=="0" goto files
 del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\CI Widget.lnk" >nul 2>&1
 :files
 if exist "%APPDIR%" rmdir /s /q "%APPDIR%"
-if exist "%~dp0windowsin\CIWidget.exe" del "%~dp0windowsin\CIWidget.exe" >nul 2>&1
+if exist "%~dp0windows\bin\CIWidget.exe" del "%~dp0windows\bin\CIWidget.exe" >nul 2>&1
 echo OK   CI Widget removed. Your config in "%USERPROFILE%\.ci-widget" was kept.
 pause

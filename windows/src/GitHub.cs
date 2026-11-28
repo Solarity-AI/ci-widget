@@ -20,6 +20,8 @@ namespace CiWidget
         public int Remaining = -1, Limit = -1;
         public DateTime ResetUtc = DateTime.MinValue;
         public string Error = "";
+        public bool Ok { get { return Status == 200 && Body != null; } }   // a 200 whose JSON can't be read is a failure
+        public string Why { get { return Status == 0 ? (Error.Length > 0 ? Error : "no answer") : Status.ToString(CultureInfo.InvariantCulture) + (Error.Length > 0 ? " " + Error : ""); } }
     }
 
     public interface IFetcher
@@ -82,7 +84,8 @@ namespace CiWidget
                 using (StreamReader r = new StreamReader(s, Encoding.UTF8)) text = r.ReadToEnd();
                 if (f.Status == 200)
                 {
-                    f.Body = Json.Parse(text);
+                    try { f.Body = Json.Parse(text); }
+                    catch { f.Error = "unreadable answer"; return f; }   // Ok stays false: never read as "nothing running"
                     string etag = resp.Headers["ETag"];
                     if (etag != null) { Cached n = new Cached(); n.ETag = etag; n.Body = f.Body; cache[url] = n; }
                     if (cache.Count > 4000) cache.Clear();   // repos come and go: never grow without end
@@ -90,7 +93,7 @@ namespace CiWidget
                 else
                 {
                     try { Dictionary<string, object> d = Json.Parse(text) as Dictionary<string, object>; f.Error = Json.Str(d, "message"); } catch { }
-                    if (f.Status == 401) token = null;    // read it again from gh next time
+                    if (f.Status == 401) tokenUtc = DateTime.MinValue;   // read it again from gh next round; keep it for this one
                 }
             }
             catch (Exception ex) { f.Error = ex.Message; }
@@ -149,7 +152,7 @@ namespace CiWidget
             return null;
         }
 
-        static int Run(string exe, string args, int ms, out string stdout)
+        internal static int Run(string exe, string args, int ms, out string stdout)
         {
             stdout = "";
             try
@@ -159,11 +162,14 @@ namespace CiWidget
                 si.RedirectStandardOutput = true; si.RedirectStandardError = true;
                 using (Process p = Process.Start(si))
                 {
-                    string err = null;
-                    Thread t = new Thread(delegate() { try { err = p.StandardError.ReadToEnd(); } catch { } });
-                    t.IsBackground = true; t.Start();
-                    stdout = p.StandardOutput.ReadToEnd();
+                    // Both pipes are read off this thread, so a helper that hangs is killed after ms, not waited for.
+                    string err = null, outText = null;
+                    Thread te = new Thread(delegate() { try { err = p.StandardError.ReadToEnd(); } catch { } });
+                    Thread to = new Thread(delegate() { try { outText = p.StandardOutput.ReadToEnd(); } catch { } });
+                    te.IsBackground = true; to.IsBackground = true; te.Start(); to.Start();
                     if (!p.WaitForExit(ms)) { try { p.Kill(); } catch { } return -1; }
+                    to.Join(2000);
+                    stdout = outText ?? "";
                     return p.ExitCode;
                 }
             }
@@ -230,7 +236,10 @@ namespace CiWidget
         List<RunnerInfo> runners = new List<RunnerInfo>();
         DateTime reposUtc = DateTime.MinValue, runnersUtc = DateTime.MinValue;
         public string Error = "";
+        public string ListProblem = "";          // a repo list that could not be read while an older one is kept
         public int Unreadable;
+        string roundError = "";                  // the round's account-wide failure (a refused token, no repo list)
+        const int MaxRunPages = 3, MaxJobPages = 5, MaxRunnerPages = 3;   // past 100 per page, within the API budget
 
         public AccountCollector(AccountConfig cfg, IFetcher fetcher) { Cfg = cfg; http = fetcher; }
 
@@ -240,6 +249,7 @@ namespace CiWidget
         {
             Fetch f = http.Get(path);
             Budget.Record(f, now);
+            if (f.Status == 401 && roundError.Length == 0) roundError = "GitHub refused the token (" + f.Why + ")";
             return f;
         }
 
@@ -254,7 +264,7 @@ namespace CiWidget
                 Error = "";
                 return false;
             }
-            Error = "";
+            Error = ""; roundError = "";
             if (repos.Count == 0 || (now - reposUtc).TotalMinutes >= 10) ListRepos(cfg, now);
             int jobRefreshSec = level == 0 ? 45 : 180;
             int coldSec = level == 0 ? 300 : 900;
@@ -266,7 +276,7 @@ namespace CiWidget
                 double since = (now - r.CheckedUtc).TotalSeconds;
                 bool due = hot ? (level == 0 || since >= 90) : since >= coldSec;
                 if (due) CheckRepo(r, now);
-                if (r.Error.Length > 0) unreadable++;
+                bool bad = r.Error.Length > 0;
                 foreach (JobRow run in r.Runs)
                 {
                     long id = RunId(run);
@@ -276,22 +286,44 @@ namespace CiWidget
                     string upd = run.UpdatedAt;
                     if (rj == null || rj.UpdatedAt != upd || (now - rj.FetchedUtc).TotalSeconds >= jobRefreshSec)
                     {
-                        Fetch f = Get("/repos/" + r.Name + "/actions/runs/" + id.ToString(CultureInfo.InvariantCulture) + "/jobs?filter=latest&per_page=100", now);
-                        if (f.Status == 200)
+                        List<JobRow> jobs = ReadJobs(r.Name, id, run, now);
+                        if (jobs != null)
                         {
                             if (rj == null) { rj = new RunJobs(); runJobs[id] = rj; }
-                            rj.Jobs = Model.FromJobs(f.Body as Dictionary<string, object>, run);
+                            rj.Jobs = jobs;
                             rj.UpdatedAt = upd; rj.FetchedUtc = now;
                         }
+                        else if (rj == null) bad = true;   // a run whose jobs were never read: say so, never show it as idle
                     }
                 }
+                if (bad) unreadable++;
             }
             Unreadable = unreadable;
+            // Out of API calls: the card says it is paused until the reset; that is not a broken account.
+            Error = Budget.Level(now, cfg.MaxCallsPerHour) == 2 ? "" : roundError;
             List<long> gone = new List<long>();
             foreach (long id in runJobs.Keys) if (!live.Contains(id)) gone.Add(id);
             foreach (long id in gone) runJobs.Remove(id);
             if ((now - runnersUtc).TotalSeconds >= (level == 0 ? 60 : 300)) ReadRunners(now);
             return true;
+        }
+
+        // Every page of a run's jobs (a big matrix passes 100), or null when the first page cannot be read.
+        List<JobRow> ReadJobs(string repo, long id, JobRow run, DateTime now)
+        {
+            string path = "/repos/" + repo + "/actions/runs/" + id.ToString(CultureInfo.InvariantCulture) + "/jobs?filter=latest&per_page=100";
+            Fetch f = Get(path, now);
+            if (!f.Ok) return null;
+            Dictionary<string, object> body = f.Body as Dictionary<string, object>;
+            List<JobRow> jobs = Model.FromJobs(body, run);
+            int total = Json.Int(body, "total_count");
+            for (int page = 2; page <= MaxJobPages && (page - 1) * 100 < total; page++)
+            {
+                Fetch p = Get(path + "&page=" + page.ToString(CultureInfo.InvariantCulture), now);
+                if (!p.Ok) break;
+                jobs.AddRange(Model.FromJobs(p.Body as Dictionary<string, object>, run));
+            }
+            return jobs;
         }
 
         static long RunId(JobRow run)
@@ -308,16 +340,32 @@ namespace CiWidget
             Dictionary<string, DateTime> found = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> explicitRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             bool anyOk = false;
+            List<string> failed = new List<string>();
             foreach (string o in Cfg.Orgs)
             {
                 if (Page("/orgs/" + o + "/repos?type=all&sort=pushed&per_page=100", found, now, DateTime.MinValue)) anyOk = true;
                 else if (Page("/users/" + o + "/repos?type=owner&sort=pushed&per_page=100", found, now, DateTime.MinValue)) anyOk = true;
+                else failed.Add(o + " (" + pageWhy + ")");
             }
             foreach (string u in Cfg.Users)
                 if (Page("/users/" + u + "/repos?type=owner&sort=pushed&per_page=100", found, now, DateTime.MinValue)) anyOk = true;
-            if (Cfg.Auto && Page("/user/repos?sort=pushed&per_page=100", found, now, now.AddDays(-30))) anyOk = true;
+                else failed.Add(u + " (" + pageWhy + ")");
+            if (Cfg.Auto)
+            {
+                if (Page("/user/repos?sort=pushed&per_page=100", found, now, now.AddDays(-30))) anyOk = true;
+                else failed.Add("your account (" + pageWhy + ")");
+            }
             foreach (string r in Cfg.Repos) { explicitRepos.Add(r); if (!found.ContainsKey(r)) found[r] = now; anyOk = true; }
-            if (!anyOk && repos.Count > 0) return;   // keep the old list through a failed refresh
+            string why = failed.Count == 0 ? "" : "could not list the repos of " + string.Join(", ", failed.ToArray());
+            ListProblem = "";
+            if (!anyOk && repos.Count > 0)
+            {
+                ListProblem = why;                       // keep the old list through a failed refresh; try again in 1 min
+                reposUtc = now.AddMinutes(-9);
+                return;
+            }
+            if (!anyOk && why.Length > 0) { if (roundError.Length == 0) roundError = why; }   // nothing to watch: an error, not "nothing running"
+            else if (why.Length > 0) ListProblem = why;
             List<string> drop = new List<string>();
             foreach (string k in repos.Keys) if (!found.ContainsKey(k)) drop.Add(k);
             foreach (string k in drop) repos.Remove(k);
@@ -333,14 +381,14 @@ namespace CiWidget
         }
 
         // Reads up to 10 pages of a repo list; stops early once repos are older than 'since' (sorted by push).
+        string pageWhy = "";
         bool Page(string path, Dictionary<string, DateTime> found, DateTime now, DateTime since)
         {
             for (int page = 1; page <= 10; page++)
             {
                 Fetch f = Get(path + "&page=" + page.ToString(CultureInfo.InvariantCulture), now);
-                if (f.Status != 200) return page > 1;
-                object[] arr = f.Body as object[];
-                if (arr == null) return page > 1;
+                object[] arr = f.Ok ? f.Body as object[] : null;
+                if (arr == null) { if (page == 1) pageWhy = f.Ok ? "unexpected answer" : f.Why; return page > 1; }
                 bool older = false;
                 foreach (object o in arr)
                 {
@@ -359,22 +407,23 @@ namespace CiWidget
         void CheckRepo(RepoState r, DateTime now)
         {
             r.CheckedUtc = now;
-            Fetch f = Get("/repos/" + r.Name + "/actions/runs?status=in_progress&per_page=100", now);
-            if (f.Status != 200) { r.Error = f.Status == 0 ? "no answer" : f.Status.ToString(CultureInfo.InvariantCulture) + " " + f.Error; return; }
+            string runsPath = "/repos/" + r.Name + "/actions/runs?status=in_progress&per_page=100";
+            Fetch f = Get(runsPath, now);
+            if (!f.Ok) { r.Error = f.Why; return; }
             r.Error = "";
             List<JobRow> runs = new List<JobRow>();
-            object[] arr = Json.Get(f.Body as Dictionary<string, object>, "workflow_runs") as object[];
-            if (arr != null)
-                foreach (object o in arr)
-                {
-                    Dictionary<string, object> d = o as Dictionary<string, object>;
-                    if (d == null) continue;
-                    JobRow run = Model.FromRun(d, Cfg.Name, r.Name);
-                    runs.Add(run);
-                }
+            AddRuns(f, runs, r.Name);
+            int totalRuns = Json.Int(f.Body as Dictionary<string, object>, "total_count");
+            for (int page = 2; page <= MaxRunPages && (page - 1) * 100 < totalRuns; page++)
+            {
+                Fetch p = Get(runsPath + "&page=" + page.ToString(CultureInfo.InvariantCulture), now);
+                if (!p.Ok) { r.Error = p.Why; break; }
+                AddRuns(p, runs, r.Name);
+            }
             r.Runs = runs;
             Fetch q = Get("/repos/" + r.Name + "/actions/runs?status=queued&per_page=100", now);
-            if (q.Status == 200)
+            if (!q.Ok && r.Error.Length == 0) r.Error = q.Why;   // the old queue stays, marked unreadable
+            if (q.Ok)
             {
                 Dictionary<string, object> qd = q.Body as Dictionary<string, object>;
                 int total = Json.Int(qd, "total_count");
@@ -392,7 +441,7 @@ namespace CiWidget
                     {
                         int lastPage = Math.Min((total + 99) / 100, 10);
                         Fetch lp = Get("/repos/" + r.Name + "/actions/runs?status=queued&per_page=100&page=" + lastPage.ToString(CultureInfo.InvariantCulture), now);
-                        object[] la = lp.Status == 200 ? Json.Get(lp.Body as Dictionary<string, object>, "workflow_runs") as object[] : null;
+                        object[] la = lp.Ok ? Json.Get(lp.Body as Dictionary<string, object>, "workflow_runs") as object[] : null;
                         if (la != null && la.Length > 0) oldest = Model.Time(Json.Get(la[la.Length - 1] as Dictionary<string, object>, "created_at"));
                     }
                     else oldest = r.Queue.OldestUtc;
@@ -405,6 +454,17 @@ namespace CiWidget
             r.Active = r.Runs.Count > 0 || r.Queue.Count > 0;
         }
 
+        void AddRuns(Fetch f, List<JobRow> runs, string repo)
+        {
+            object[] arr = Json.Get(f.Body as Dictionary<string, object>, "workflow_runs") as object[];
+            if (arr == null) return;
+            foreach (object o in arr)
+            {
+                Dictionary<string, object> d = o as Dictionary<string, object>;
+                if (d != null) runs.Add(Model.FromRun(d, Cfg.Name, repo));
+            }
+        }
+
         void ReadRunners(DateTime now)
         {
             runnersUtc = now;
@@ -412,25 +472,32 @@ namespace CiWidget
             List<string> scopes = new List<string>();
             foreach (string o in Cfg.RunnerOrgs) scopes.Add("/orgs/" + o + "/actions/runners?per_page=100");
             foreach (string r in Cfg.RunnerRepos) scopes.Add("/repos/" + r + "/actions/runners?per_page=100");
+            bool failed = false;
             foreach (string s in scopes)
             {
                 DateTime until;
                 if (runnerDenied.TryGetValue(s, out until) && until > now) continue;
-                Fetch f = Get(s, now);
-                if (f.Status == 403 || f.Status == 404) { runnerDenied[s] = now.AddHours(1); continue; }
-                if (f.Status != 200) continue;
-                object[] arr = Json.Get(f.Body as Dictionary<string, object>, "runners") as object[];
-                if (arr == null) continue;
-                foreach (object o in arr)
+                // Runner lists need admin rights: a 403 or 404 is normal, so it stays quiet and is not asked again for 1 h.
+                for (int page = 1; page <= MaxRunnerPages; page++)
                 {
-                    Dictionary<string, object> d = o as Dictionary<string, object>;
-                    if (d == null) continue;
-                    RunnerInfo ri = new RunnerInfo();
-                    ri.Name = Json.Str(d, "name"); ri.Status = Json.Str(d, "status"); ri.Busy = Json.Bool(d, "busy", false);
-                    list.Add(ri);
+                    Fetch f = Get(page == 1 ? s : s + "&page=" + page.ToString(CultureInfo.InvariantCulture), now);
+                    if (f.Status == 403 || f.Status == 404) { runnerDenied[s] = now.AddHours(1); break; }
+                    if (!f.Ok) { failed = true; break; }
+                    Dictionary<string, object> body = f.Body as Dictionary<string, object>;
+                    object[] arr = Json.Get(body, "runners") as object[];
+                    if (arr == null) break;
+                    foreach (object o in arr)
+                    {
+                        Dictionary<string, object> d = o as Dictionary<string, object>;
+                        if (d == null) continue;
+                        RunnerInfo ri = new RunnerInfo();
+                        ri.Name = Json.Str(d, "name"); ri.Status = Json.Str(d, "status"); ri.Busy = Json.Bool(d, "busy", false);
+                        list.Add(ri);
+                    }
+                    if (page * 100 >= Json.Int(body, "total_count")) break;
                 }
             }
-            if (scopes.Count > 0) runners = list;
+            if (scopes.Count > 0 && !failed) runners = list;   // a list read only in part keeps the last whole one
         }
 
         // The rows of this account's last round.
@@ -448,6 +515,7 @@ namespace CiWidget
         }
 
         public int RepoCount { get { return repos.Count; } }
+        public IEnumerable<string> RepoNames { get { return repos.Keys; } }
     }
 
     // All accounts together: 1 round each, then 1 Snapshot.
@@ -474,11 +542,19 @@ namespace CiWidget
             s.TakenUtc = now;
             List<RunnerInfo> runners = new List<RunnerInfo>();
             bool slowed = false, paused = false;
+            // 2 accounts can see the same repo or runner: each job, queue, runner and repo counts once.
+            HashSet<string> seenJobs = new HashSet<string>(StringComparer.Ordinal);
+            HashSet<string> seenQueues = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> seenRunners = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> seenRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (AccountCollector a in accounts)
             {
-                a.Fill(s.Jobs, s.Queues);
-                runners.AddRange(a.Runners);
-                s.ReposWatched += a.RepoCount;
+                List<JobRow> jobs = new List<JobRow>(); List<QueueRow> queues = new List<QueueRow>();
+                a.Fill(jobs, queues);
+                foreach (JobRow j in jobs) if (seenJobs.Add(j.Url + "|" + j.Job)) s.Jobs.Add(j);
+                foreach (QueueRow q in queues) if (seenQueues.Add(q.Repo)) s.Queues.Add(q);
+                foreach (RunnerInfo ri in a.Runners) if (seenRunners.Add(ri.Name)) runners.Add(ri);
+                foreach (string rn in a.RepoNames) seenRepos.Add(rn);
                 AccountHealth h = new AccountHealth();
                 h.Name = a.Cfg.Name; h.Error = a.Error;
                 h.Remaining = a.Budget.Remaining; h.Limit = a.Budget.Limit; h.ResetUtc = a.Budget.ResetUtc;
@@ -488,7 +564,9 @@ namespace CiWidget
                 if (lv == 1) slowed = true;
                 if (lv == 2) paused = true;
                 if (a.Unreadable > 0 && s.Note.Length == 0) s.Note = Model.Count(a.Unreadable, "repo", "repos") + " could not be read (" + a.Cfg.Name + ")";
+                if (a.ListProblem.Length > 0 && s.Note.Length == 0) s.Note = a.Cfg.Name + ": " + a.ListProblem;
             }
+            s.ReposWatched = seenRepos.Count;
             if (paused) s.Note = "Paused until the API limit resets";
             else if (slowed) s.Note = "Slowed down to save the API limit";
             s.Queues = Model.SortQueues(s.Queues);
