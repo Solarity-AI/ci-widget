@@ -73,6 +73,6 @@ your config and writes what it found. See [AGENTS.md](AGENTS.md) for the layout.
 
 ## License
 
-[MIT](LICENSE)
+Free to download and use, personally or inside your organization, under the [Solarity AI Use License](LICENSE). Selling, redistributing or publishing modified versions needs written permission from Solarity AI LLC.
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
