@@ -63,8 +63,8 @@ answers are free (ETag), quiet repos are read every 5 min, and it slows down by 
 ## Develop and test
 
 ```sh
-sh tools/verify.sh windows-core   # build and self-test, ~15 s
-sh tools/verify.sh windows        # plus the install and uninstall tests in scratch folders
+sh tools/verify.sh windows-core   # build and self-test, ~5 s
+sh tools/verify.sh windows        # plus the install and uninstall tests in scratch folders, ~20 s
 sh tools/verify.sh privacy        # no tokens or private names in tracked files
 ```
 
